@@ -1,0 +1,137 @@
+<!doctype html>
+
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>WebGPU Life</title>
+</head>
+<body>
+<canvas width="512" height="512"></canvas>
+<script type="module">
+    // Select the first canvas element from the HTML document.
+    const documentCanvas = document.querySelector("canvas");
+    if (!documentCanvas) {
+        console.error("Canvas not found.");
+        throw new Error("Execution halted (1).");
+    }
+
+    // Checks if WebGPU is supported in the browser
+    if (!('gpu' in navigator)) {
+        console.error("WebGPU not supported in this browser.");
+        throw new Error("Execution halted (2).");
+    }
+
+    // Attempt to request a WebGPU adapter
+    const gpuAdapter = await navigator.gpu.requestAdapter();
+    if (!gpuAdapter) {
+        console.error("Requesting WebGPU adapter failed");
+        throw new Error("Execution halted (3).");
+    }
+
+    // Request a WebGPU device from the adapter
+    const adapterDevice = await gpuAdapter.requestDevice();
+
+    // Get a WebGPU context from the canvas
+    const canvasContext = documentCanvas.getContext("webgpu");
+
+    // Determine the preferred format for the canvas
+    const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+
+    // Configure the canvas to be used with the device we just requested
+    canvasContext.configure({
+        device: adapterDevice, // Specify the WebGPU device
+        format: canvasFormat, // Set the preferred format for the canvas
+    });
+
+    // Defines a square that takes 80% of the canvas, made of two triangles.
+    // @todo investigate index buffers for a higher level of abstraction
+    const vertices = new Float32Array([
+        //  X,    Y,
+        -0.8, -0.8, // Triangle 1 (Blue)
+        0.8, -0.8,
+        0.8,  0.8,
+
+        -0.8, -0.8, // Triangle 2 (Red)
+        0.8,  0.8,
+        -0.8,  0.8,
+    ]);
+
+    // Convert Float32Array to opaque GPU-readable Vertex Buffer.
+    const vertexBuffer = adapterDevice.createBuffer({
+        label: "Cell vertices",
+        size: vertices.byteLength,
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST, // buffer to be used for vertex data (GPUBufferUsage.VERTEX) and we can copy data into it (GPUBufferUsage.COPY_DST).
+    });
+    adapterDevice.queue.writeBuffer(vertexBuffer, /*bufferOffset=*/0, vertices);
+
+    // Define the vertex data structure with a GPUVertexBufferLayout dictionary:
+    const vertexBufferLayout = {
+        arrayStride: 8, // Number of bytes the GPU needs to skip forward in the buffer when it's looking for the next vertex. Each vertex of your square is made up of two 32-bit floating point numbers. A 32-bit float is 4 bytes, so two floats is 8 bytes.
+        attributes: [{
+            format: "float32x2", // Our vertices have two 32-bit floats each
+            offset: 0,
+            shaderLocation: 0, // Arbitrary number between 0 and 15 and must be unique for every attribute that you define. It links this attribute to a particular input in the vertex shader
+        }],
+    };
+
+    // Shaders in WebGPU are written in a shading language called WGSL (WebGPU Shading Language)
+    const cellShaderModule = adapterDevice.createShaderModule({
+        label: "Cell shader",
+        code: `
+          @vertex
+          fn vertexMain(@location(0) position: vec2f) -> @builtin(position) vec4f {
+            return vec4f(position, 0, 1);
+          }
+
+          @fragment
+          fn fragmentMain() -> @location(0) vec4f {
+            return vec4f(0.25, 0, 0, 1);
+          }
+        `
+    });
+
+    // Create a pipeline that renders the cell.
+    const cellPipeline = adapterDevice.createRenderPipeline({
+        label: "Cell pipeline",
+        layout: "auto",
+        vertex: {
+            module: cellShaderModule,
+            entryPoint: "vertexMain",
+            buffers: [vertexBufferLayout]
+        },
+        fragment: {
+            module: cellShaderModule,
+            entryPoint: "fragmentMain",
+            targets: [{
+                format: canvasFormat
+            }]
+        }
+    });
+
+    // Request a GPUCommandEncoder which provides an interface for recording GPU commands
+    const deviceEncoder = adapterDevice.createCommandEncoder();
+
+    // Record the commands necessary to clear the canvas in a Render Pass
+    const pass = deviceEncoder.beginRenderPass({
+        colorAttachments: [{
+            view: canvasContext.getCurrentTexture().createView(),
+            loadOp: "clear", // A loadOp value of "clear" indicates that you want the texture to be cleared when the render pass starts.
+            clearValue: { r: 0.5, g: 0.3, b: 0.3, a: 1 }, // Value to clear to.
+            storeOp: "store", // A storeOp value of "store" indicates that once the render pass is finished you want the results of any drawing done during the render pass saved into the texture.
+        }]
+    });
+
+    // Draw the 80% square.
+    pass.setPipeline(cellPipeline);
+    pass.setVertexBuffer(0, vertexBuffer);
+    pass.draw(vertices.length / 2);
+
+    pass.end();
+
+    // Finish the command buffer and immediately submit it.
+    const r = deviceEncoder.finish();
+    adapterDevice.queue.submit([r]);
+
+</script>
+</body>
+</html>
